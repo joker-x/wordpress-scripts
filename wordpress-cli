@@ -1,0 +1,307 @@
+#!/bin/bash
+
+# 
+# Actualiza a la última versión disponible de wordpress
+#
+
+# LICENCIA:
+#
+# Copyright 2012
+# Iván Eixarch <ivan@sinanimodelucro.org>
+# https://github.com/joker-x/wordpress-scripts
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+# MA 02110-1301, USA.
+#
+
+# DEPENDENCIAS:
+#
+#  bash
+#  php-cli
+#  curl
+#  unzip
+#  lynx (opcional)
+
+#
+# CONFIGURACIÓN ESPECÍFICA DEL SISTEMA
+# ------------------------------------
+#
+# Nombre de la base de datos:
+NOMBRE_BD=""
+# Ruta absoluta donde está instalado wordpress. Ej: /var/www/wordpress
+DIR_WP=""
+# Ruta absoluta donde se guardarán las copias de seguridad. Ej: /var/backups/actualizaciones-wp
+DIR_BACKUP=""
+# URL de nuestro blog. Ej: http://democraciarealya.es
+URL_WP=""
+
+# Variables de configuración relativas a los permisos que se establecen tras la actualización
+USUARIO_WEB="www-data"
+GRUPO_WEB="www-data"
+PERMISOS_FICHEROS="640"
+PERMISOS_DIRECTORIOS="2750"
+
+#
+# A partir de aqui, no debería ser necesario editar nada
+#
+
+VERSION_API_WP="http://api.wordpress.org/core/version-check/1.6/"
+
+# Comprueba que las variables de configuración son correctas
+function test_conf {
+
+	if [[ -z "$NOMBRE_BD" || -z "$DIR_WP" || -z "$DIR_BACKUP" || -z "$USUARIO_WEB" || -z "$GRUPO_WEB" || -z "$PERMISOS_FICHEROS" || -z "$PERMISOS_DIRECTORIOS" ]]; then
+		echo "ERROR CRÍTICO: Variable de configuración no definida"
+		exit 1
+	fi
+
+	if [[ ! -d "$DIR_WP" ]]; then
+		echo "ERROR CRÍTICO: $DIR_WP no es un directorio válido"
+		exit 1
+	fi
+	
+	if [[ ! -f "$DIR_WP/wp-config.php" ]]; then
+		echo "AVISO: $DIR_WP no parece tener una instalación activa de wordpress"
+		read -p "¿Desea continuar de todas formas? (s/n) " CONFIRMA
+		if [[ "$CONFIRMA" != "S" && "$CONFIRMA" != "s" ]]; then
+			echo "Abortado por el usuario"
+			exit 1
+		fi
+	fi
+	
+	if [[ ! -d "$DIR_BACKUP" ]]; then
+		echo "AVISO: El directorio $DIR_BACKUP no existe"
+		read -p "¿Desea crearlo? (s/n) " CONFIRMA
+		if [[ "$CONFIRMA" == "S" || "$CONFIRMA" == "s" ]]; then
+			mkdir -p "$DIR_BACKUP"
+		else
+			echo "ERROR CRÍTICO: $DIR_BACKUP no es un directorio válido"
+			exit 1
+		fi
+	fi
+	
+	if [[ "$DIR_WP" == "$DIR_BACKUP" ]]; then
+		echo "ERROR CRÍTICO: DIR_WP y DIR_BACKUP deben ser diferentes directorios"
+		exit 1
+	fi
+
+	if [[ -f "~/.my.cnf" ]]; then
+		echo "AVISO: Debes configurar el archivo ~/.my.cnf para acceder a la base de datos"
+	fi
+	
+	return 0
+
+}
+
+function dame_dato_API {
+	if [[ -z "$API_WP" ]]; then
+		API_WP=$(curl -sS $VERSION_API_WP)
+	fi
+	php -r "\$dato=unserialize('"$API_WP"');\$dato=\$dato$*;echo \"\$dato\";" 2>/dev/null
+}
+
+function dame_url_descarga {
+	dame_dato_API "['offers'][0]['packages']['no_content']"
+}
+
+function dame_ultima_version {
+	dame_dato_API "['offers'][0]['current']"
+}
+
+function dame_version_mysql_requerida {
+	dame_dato_API "['offers'][0]['mysql_version']"
+}
+
+function dame_version_php_requerida {
+	dame_dato_API "['offers'][0]['php_version']"
+}
+
+function dame_version_wp_instalada {
+	local FICHERO_VERSION="$*/wp-includes/version.php"
+	if [[ ! -f "$FICHERO_VERSION" ]]; then
+		FICHERO_VERSION="$DIR_WP/wp-includes/version.php"
+	fi
+		
+	php -r "require(\"$FICHERO_VERSION\");echo \$wp_version;" 2>/dev/null
+}
+
+function dame_idioma_wp {
+	local FICHERO_CONF="$*/wp-config.php"
+	if [[ ! -f "$FICHERO_CONF" ]]; then
+		FICHERO_CONF="$DIR_WP/wp-config.php"
+	fi
+		
+	php -r "require(\"$FICHERO_CONF\");echo WPLANG;" 2>/dev/null
+}
+
+function dame_version_php_instalada {
+	php -v 2>/dev/null | cut -d " " -f 2 | head -n 1
+}
+
+function dame_version_mysql_instalada {
+	mysql -V 2>/dev/null | cut -d " " -f 6 | cut -d "," -f 1 | head -n 1
+}
+
+function activar_mantenimiento {
+	local RUTA_WP="$*"
+	if [[ ! -d "$RUTA_WP" ]]; then
+		RUTA_WP=$DIR_WP
+	fi
+	echo '<?php $upgrading = time(); ?>' > $RUTA_WP/.maintenance
+	echo "AVISO: Modo mantenimiento activado para wordpress $RUTA_WP"
+}
+
+function desactivar_mantenimiento {
+	local RUTA_WP="$*"
+	if [[ ! -d "$RUTA_WP" ]]; then
+		RUTA_WP=$DIR_WP
+	fi
+	rm -f $RUTA_WP/.maintenance
+	echo "AVISO: Modo mantenimiento desactivado para wordpress $RUTA_WP"
+}
+
+function ajustar_permisos {
+	local RUTA_WP="$*"
+	if [[ ! -d "$RUTA_WP" ]]; then
+		RUTA_WP=$DIR_WP
+	fi
+	find ${RUTA_WP} -name "*"         -exec chown ${USUARIO_WEB}:${GRUPO_WEB} "{}" \;
+	find ${RUTA_WP} -name "*" -type f -exec chmod ${PERMISOS_FICHEROS} "{}" \;
+	find ${RUTA_WP} -name "*" -type d -exec chmod ${PERMISOS_DIRECTORIOS}  "{}" \;
+}
+
+function estado {
+	echo
+	echo -e "WP\tDisponible: v $ULTIMA_VERSION_WP\tInstalada: v $VERSION_WP"
+	echo -e "PHP\tRequerida:  v $VERSION_PHP_REQ\tInstalada: v $VERSION_PHP"
+	echo -e "MySQL\tRequerida:  v $VERSION_MYSQL_REQ\tInstalada: v $VERSION_MYSQL"
+	echo "Idioma: $IDIOMA_WP"
+	echo
+	#echo "URL de descarga: $URL_DESCARGA"
+	#echo "Marca de tiempo: $MARCA_TIEMPO"
+	#echo
+}
+
+function salvar_bd {
+        local DESTINO="$DIR_BACKUP/base_de_datos.sql"
+        echo "Volcando base de datos a $DESTINO"
+        mysqldump $NOMBRE_BD > $DESTINO
+        [ $? -ne 0 ] && echo "ERROR CRÍTICO: No se pudo volcar la base de datos correctamente. Abortado." && exit 1
+}
+
+function salvar_www {
+        local DESTINO="$DIR_BACKUP/www"
+        mkdir -p "$DESTINO"
+        echo "Copiando ficheros de $DIR_WP a $DESTINO"
+        cp -raf ${DIR_WP}/* "$DESTINO"
+        [ $? -ne 0 ] && echo "ERROR CRÍTICO: La copia de seguridad de su instalación de wordpress ha fallado. Abortado." && exit 1
+}
+
+function descargar_zip {
+        echo "Descargando archivo $URL_DESCARGA a $DIR_BACKUP/$ULTIMA_VERSION_WP.zip"
+        cd "$DIR_BACKUP"                                        && \
+        curl -sS "$URL_DESCARGA" > "$ULTIMA_VERSION_WP.zip"     && \
+        echo "Descomprimiendo archivo $DIR_BACKUP/$ULTIMA_VERSION_WP.zip" && \
+        unzip -q "$ULTIMA_VERSION_WP.zip"                       && \
+        rm -f "$ULTIMA_VERSION_WP.zip"
+        [ $? -ne 0 ] && echo "ERROR CRÍTICO: La descarga de la última versión de wordpress ha fallado. Abortado." && exit 1
+}
+
+
+function instalar_zip {
+        local ORIGEN="$DIR_BACKUP/wordpress"
+        if [[ ! -d "$ORIGEN" ]]; then
+                echo "ERROR CRÍTICO: No existe $DIR_BACKUP/wordpress"
+                exit 1
+        fi
+        cp -rpf ${ORIGEN}/* "$DIR_WP/"
+        [ $? -ne 0 ] && echo "ERROR CRÍTICO: La copia de archivos ha fallado. Abortado." && exit 1
+}
+
+
+function actualizar {
+	if [[ "$VERSION_WP" == "$ULTIMA_VERSION_WP" ]]; then
+		echo "Ya estás actualizado a la última versión de Wordpress"
+		exit 0
+	else
+		read -p "¿Quiere actualizar su wordpress $VERSION_WP a la versión $ULTIMA_VERSION_WP? (s/n)" CONFIRMA
+		if [[ "$CONFIRMA" != "S" && "$CONFIRMA" != "s" ]]; then
+			echo "Actualización abortada por el usuario"
+			exit 0
+		fi
+	fi
+	
+	activar_mantenimiento
+	echo "Iniciando copia de seguridad..."
+	mkdir -p "$DIR_BACKUP"
+	salvar_bd
+	salvar_www
+	descargar_zip
+	instalar_zip
+	ajustar_permisos
+	desactivar_mantenimiento
+	URL_WP="$URL_WP/wp-admin/upgrade.php"
+	echo "Para completar la actualización es necesario visitar $URL_WP"
+	read -p "¿Desea abrirla con lynx? (s/n) " CONFIRMA
+	if [[ "$CONFIRMA" == "S" || "$CONFIRMA" == "s" ]]; then
+		lynx -accept_all_cookies "$URL_WP/wp-admin/upgrade.php"
+	fi
+	
+	[ $? -eq 0 ] && echo "Wordpress actualizado con éxito a la versión $ULTIMA_VERSION_WP"
+}
+
+function mensaje_uso {
+	echo "USO: $0 [comando] [/ruta/absoluta/wordpress]"
+	echo "Comandos:"
+	echo -e "\tactualizar\n\t\tActualiza a la último versión de wordpress disponible. Comando por defecto"
+	echo -e "\testado\n\t\tDetecta la version instalada de wordpress, la última disponible y sus dependencias"
+	echo -e "\tactivar_mantenimiento\n\t\tActiva el modo mantenimiento de la instalación de wordpress"
+	echo -e "\tdesactivar_mantenimiento\n\t\tDesactiva el modo mantenimiento de la instalación de wordpress"
+	echo -e "\tajustar_permisos\n\t\tCambia propietario/grupo y ajusta los permisos a una instalación de wordpress"
+}
+
+test_conf
+
+API_WP=$(curl -sS $VERSION_API_WP)
+VERSION_WP=$(dame_version_wp_instalada)
+VERSION_MYSQL=$(dame_version_mysql_instalada)
+VERSION_PHP=$(dame_version_php_instalada)
+ULTIMA_VERSION_WP=$(dame_ultima_version)
+VERSION_MYSQL_REQ=$(dame_version_mysql_requerida)
+VERSION_PHP_REQ=$(dame_version_php_requerida)
+URL_DESCARGA=$(dame_url_descarga)
+MARCA_TIEMPO=$(date -u +%Y-%m-%d-%Hh%Mm%Ss)
+IDIOMA_WP=$(dame_idioma_wp)
+DIR_BACKUP="$DIR_BACKUP/$MARCA_TIEMPO"
+
+if [[ $# -eq 0 ]]; then
+	estado
+	actualizar
+else
+	if [[ 	$1 == "actualizar" || 
+		$1 == "activar_mantenimiento" || 
+		$1 == "desactivar_mantenimiento" || 
+		$1 == "estado" || 
+		$1 == "ajustar_permisos" ]]; then
+		$*
+	else
+		echo "Error de sintaxis"
+		mensaje_uso
+		exit 1
+	fi
+fi
+
+exit 0
+
