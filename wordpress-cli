@@ -320,7 +320,7 @@ else
 		$1 == "activar_mantenimiento" || 
 		$1 == "desactivar_mantenimiento" || 
 		$1 == "estado" || 
-		$1 == "ajustar_permisos"
+		$1 == "ajustar_permisos" ||
 		$1 == "instalar_idioma" ]]; then
 		$*
 	else
