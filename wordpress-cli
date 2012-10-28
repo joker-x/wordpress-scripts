@@ -187,11 +187,7 @@ function estado {
 	echo -e "WP\tDisponible: v $ULTIMA_VERSION_WP\tInstalada: v $VERSION_WP"
 	echo -e "PHP\tRequerida:  v $VERSION_PHP_REQ\tInstalada: v $VERSION_PHP"
 	echo -e "MySQL\tRequerida:  v $VERSION_MYSQL_REQ\tInstalada: v $VERSION_MYSQL"
-	echo "Idioma: $IDIOMA_WP"
 	echo
-	#echo "URL de descarga: $URL_DESCARGA"
-	#echo "Marca de tiempo: $MARCA_TIEMPO"
-	#echo
 }
 
 function salvar_bd {
@@ -231,6 +227,31 @@ function instalar_zip {
 }
 
 
+function descargar_enlaces_recursivo {
+	local BASE_URL=$1
+	local WEBSITE=$(curl -sS $BASE_URL/)
+	local BASE_DIR=$2
+	local FICHEROS_DESCARGABLES=$(echo $WEBSITE | grep -oE 'href=\"[^"]*\.(mo|po)\"' | cut -d '"' -f 2)
+	for f in $FICHEROS_DESCARGABLES; do 
+		echo "Descargando $BASE_URL/$f"
+		curl -sS $BASE_URL/$f > $BASE_DIR/$f; 
+	done
+	local SUBDIRECTORIOS=$(echo $WEBSITE | grep -oE 'href=\"[^\.][^(http)][^"]*/\"' |  cut -d '"' -f 2 | cut -d '/' -f 1)
+	for s in $SUBDIRECTORIOS; do
+		[[ ! -d "$BASE_DIR/$s" ]] && mkdir "$BASE_DIR/$s"
+		descargar_enlaces_recursivo "$BASE_URL/$s" "$BASE_DIR/$s" 
+	done
+}
+
+function instalar_idioma {
+	if [[ -z $1 ]]; then
+		echo "Idioma no disponible" && return 1
+	else
+		descargar_enlaces_recursivo "http://svn.automattic.com/wordpress-i18n/$1/trunk/messages" "$DIR_WP/wp-content/languages"
+	fi
+}
+
+
 function actualizar {
 	if [[ "$VERSION_WP" == "$ULTIMA_VERSION_WP" ]]; then
 		echo "Ya estás actualizado a la última versión de Wordpress"
@@ -250,6 +271,10 @@ function actualizar {
 	salvar_www
 	descargar_zip
 	instalar_zip
+	if [[ ! -z $IDIOMA_WP ]]; then
+		echo "Detectado paquete de idioma $IDIOMA_WP. Instalando traducción..."
+		instalar_idioma "$IDIOMA_WP"
+	fi
 	ajustar_permisos
 	desactivar_mantenimiento
 	URL_WP="$URL_WP/wp-admin/upgrade.php"
@@ -270,6 +295,7 @@ function mensaje_uso {
 	echo -e "\tactivar_mantenimiento\n\t\tActiva el modo mantenimiento de la instalación de wordpress"
 	echo -e "\tdesactivar_mantenimiento\n\t\tDesactiva el modo mantenimiento de la instalación de wordpress"
 	echo -e "\tajustar_permisos\n\t\tCambia propietario/grupo y ajusta los permisos a una instalación de wordpress"
+	echo -e "\tinstalar_idioma codigo-idioma\n\t\tSe descarga los ficheros de tradución al idioma especificado"
 }
 
 test_conf
@@ -294,7 +320,8 @@ else
 		$1 == "activar_mantenimiento" || 
 		$1 == "desactivar_mantenimiento" || 
 		$1 == "estado" || 
-		$1 == "ajustar_permisos" ]]; then
+		$1 == "ajustar_permisos"
+		$1 == "instalar_idioma" ]]; then
 		$*
 	else
 		echo "Error de sintaxis"
